@@ -46,7 +46,7 @@ on:
         type: string
         default: Wild
       commit_mode:
-        description: "latest = branch tips, verified = audited pins, update = build latest then promote verified pins on success"
+        description: "latest = branch tips (SukiSU-Ultra android14-6.1 keeps its audited SUSFS compatibility pin), verified = audited pins, update = build latest then promote verified pins on success"
         required: false
         type: choice
         options:
@@ -342,8 +342,19 @@ jobs:
             emit "$key" "$(pick "${PIN_SUSFS[$key]}" https://gitlab.com/simonpunk/susfs4ksu.git refs/heads/${SUSFS_BRANCHES[$key]})"
             # Per-flavor ReSukiSU SUSFS pin (same branch, own pin set).
             emit "${key}_resukisu" "$(pick "${PIN_SUSFS_RESUKISU[$key]}" https://gitlab.com/simonpunk/susfs4ksu.git refs/heads/${SUSFS_BRANCHES[$key]})"
-            # Per-flavor SukiSU-Ultra SUSFS pin (same branch, own pin set).
-            emit "${key}_sukisu_ultra" "$(pick "${PIN_SUSFS_SUKISU_ULTRA[$key]}" https://gitlab.com/simonpunk/susfs4ksu.git refs/heads/${SUSFS_BRANCHES[$key]})"
+            # SukiSU-Ultra android14-6.1 compatibility rule:
+            # keep the audited SUSFS commit even in latest/update mode.
+            # The SukiSU-Ultra root itself still follows commit_mode, so
+            # "latest" continues to use the current builtin branch tip.
+            # This avoids mixing a moving SUSFS sucompat patch-set with the
+            # current SukiSU-Ultra builtin API (which can otherwise link-fail
+            # on ksu_handle_post_execveat_sucompat).
+            if [ "$key" = "susfs_commit_android14_6_1" ]; then
+              echo "SukiSU-Ultra android14-6.1: using audited SUSFS compatibility pin ${PIN_SUSFS_SUKISU_ULTRA[$key]}"
+              emit "${key}_sukisu_ultra" "${PIN_SUSFS_SUKISU_ULTRA[$key]}"
+            else
+              emit "${key}_sukisu_ultra" "$(pick "${PIN_SUSFS_SUKISU_ULTRA[$key]}" https://gitlab.com/simonpunk/susfs4ksu.git refs/heads/${SUSFS_BRANCHES[$key]})"
+            fi
           done
 
           # Tracked build helpers (resolved automatically, before the run)
