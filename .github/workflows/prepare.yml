@@ -76,6 +76,17 @@ on:
         required: false
         type: string
         default: ""
+      expected_kernel_source_commit:
+        description: "Exact expected kernel/common SHA; empty disables the guard"
+        required: false
+        type: string
+        default: ""
+
+      expected_sublevel:
+        description: "Exact expected kernel sublevel; empty disables the guard"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   generate-matrix:
@@ -183,4 +194,6 @@ jobs:
       brand_name: ${{ inputs.brand_name }}
       bypass: ${{ inputs.bypass }}
       use_cache: ${{ inputs.use_cache }}
+      expected_kernel_source_commit: ${{ inputs.expected_kernel_source_commit }}
+      expected_sublevel: ${{ inputs.expected_sublevel }}
     secrets: inherit
