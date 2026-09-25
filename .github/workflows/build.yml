@@ -72,6 +72,17 @@ on:
         required: false
         type: boolean
         default: true
+      expected_kernel_source_commit:
+        description: "Exact expected kernel/common SHA"
+        required: false
+        type: string
+        default: ""
+
+      expected_sublevel:
+        description: "Exact expected kernel sublevel"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build-gki:
@@ -160,6 +171,42 @@ jobs:
         sublevel: ${{ inputs.sublevel }}
         os_patch_level: ${{ inputs.os_patch_level }}
         variant: ${{ inputs.variant }}
+
+    - name: Validate Exact Kernel Baseline
+      if: inputs.expected_kernel_source_commit != '' || inputs.expected_sublevel != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        EXPECTED_COMMIT="${{ inputs.expected_kernel_source_commit }}"
+        EXPECTED_SUBLEVEL="${{ inputs.expected_sublevel }}"
+        ACTUAL_COMMIT="${KERNEL_SOURCE_COMMIT:-}"
+        ACTUAL_SUBLEVEL="${{ steps.extract.outputs.sublevel }}"
+
+        echo "=== REDMAGIC kernel baseline validation ==="
+        echo "Expected kernel/common: ${EXPECTED_COMMIT}"
+        echo "Actual kernel/common:   ${ACTUAL_COMMIT}"
+        echo "Expected sublevel:      ${EXPECTED_SUBLEVEL}"
+        echo "Actual sublevel:        ${ACTUAL_SUBLEVEL}"
+
+        if [ -n "$EXPECTED_COMMIT" ]; then
+          if ! [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: expected kernel source commit is not a full SHA." >&2
+            exit 1
+          fi
+
+          if [ "$ACTUAL_COMMIT" != "$EXPECTED_COMMIT" ]; then
+            echo "ERROR: kernel/common moved. Refusing to build a different kernel." >&2
+            exit 1
+          fi
+        fi
+
+        if [ -n "$EXPECTED_SUBLEVEL" ] && [ "$ACTUAL_SUBLEVEL" != "$EXPECTED_SUBLEVEL" ]; then
+          echo "ERROR: expected kernel 6.1.${EXPECTED_SUBLEVEL}, got 6.1.${ACTUAL_SUBLEVEL}." >&2
+          exit 1
+        fi
+
+        echo "Kernel baseline validation PASSED."
 
     - name: Kernel Fixes
       uses: ./.github/actions/kernel-fixes
