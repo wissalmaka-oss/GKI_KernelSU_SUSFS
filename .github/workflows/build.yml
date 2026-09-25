@@ -458,6 +458,145 @@ jobs:
     - name: Clean Kernel Flags
       uses: ./.github/actions/clean-kernel-flags
 
+    - name: Validate SukiSU Ultra + Full SUSFS + KPM
+      if: inputs.root_flavor == 'sukisu-ultra' && (contains(inputs.feature_set, 'SUSFS') || inputs.feature_set == 'All')
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        KERNEL_DIR="${GITHUB_WORKSPACE}/kernel"
+        SUKI_DIR="${KERNEL_DIR}/SukiSU-Ultra"
+        SUSFS_DIR="${GITHUB_WORKSPACE}/susfs4ksu"
+        DEFCONFIG="${KERNEL_DIR}/common/arch/arm64/configs/gki_defconfig"
+        SUSFS_HEADER="${KERNEL_DIR}/common/include/linux/susfs.h"
+
+        echo "======================================================"
+        echo " SukiSU Ultra / SUSFS / KPM strict validation"
+        echo "======================================================"
+
+        test -d "$SUKI_DIR/.git" || {
+          echo "ERROR: SukiSU checkout missing." >&2
+          exit 1
+        }
+
+        test -d "$SUSFS_DIR/.git" || {
+          echo "ERROR: SUSFS checkout missing." >&2
+          exit 1
+        }
+
+        test -f "$DEFCONFIG" || {
+          echo "ERROR: gki_defconfig missing." >&2
+          exit 1
+        }
+
+        # ----- Verify immutable source SHAs -----
+        ACTUAL_SUKI="$(git -C "$SUKI_DIR" rev-parse HEAD)"
+        EXPECTED_SUKI="${{ inputs.root_commit }}"
+
+        ACTUAL_SUSFS="$(git -C "$SUSFS_DIR" rev-parse HEAD)"
+        EXPECTED_SUSFS="${{ inputs.susfs_commit }}"
+
+        echo "Suki expected:  $EXPECTED_SUKI"
+        echo "Suki actual:    $ACTUAL_SUKI"
+        echo "SUSFS expected: $EXPECTED_SUSFS"
+        echo "SUSFS actual:   $ACTUAL_SUSFS"
+
+        [ "$ACTUAL_SUKI" = "$EXPECTED_SUKI" ] || {
+          echo "ERROR: SukiSU commit mismatch." >&2
+          exit 1
+        }
+
+        [ "$ACTUAL_SUSFS" = "$EXPECTED_SUSFS" ] || {
+          echo "ERROR: SUSFS commit mismatch." >&2
+          exit 1
+        }
+
+        # ----- Required complete feature set -----
+        REQUIRED_CONFIGS=(
+          CONFIG_KSU
+          CONFIG_KPM
+          CONFIG_KSU_SUSFS
+          CONFIG_KSU_SUSFS_SUS_PATH
+          CONFIG_KSU_SUSFS_SUS_MOUNT
+          CONFIG_KSU_SUSFS_SUS_KSTAT
+          CONFIG_KSU_SUSFS_SPOOF_UNAME
+          CONFIG_KSU_SUSFS_ENABLE_LOG
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          CONFIG_KSU_SUSFS_SUS_MAP
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        )
+
+        echo
+        echo "Checking Kconfig symbols and effective gki_defconfig state..."
+
+        for KEY in "${REQUIRED_CONFIGS[@]}"; do
+          SYMBOL="${KEY#CONFIG_}"
+
+          if ! grep -Eq "^[[:space:]]*config[[:space:]]+${SYMBOL}([[:space:]]|$)" \
+              "$SUKI_DIR/kernel/Kconfig"; then
+            echo "ERROR: $SYMBOL does not exist in selected SukiSU Kconfig." >&2
+            exit 1
+          fi
+
+          STATE="$(
+            grep -E "^${KEY}=|^# ${KEY} is not set$" "$DEFCONFIG" |
+            tail -n 1 || true
+          )"
+
+          if [ "$STATE" != "${KEY}=y" ]; then
+            echo "ERROR: ${KEY} is not effectively enabled. Found: ${STATE:-missing}" >&2
+            exit 1
+          fi
+
+          echo "PASS: ${KEY}=y"
+        done
+
+        # ----- Verify actual SUSFS kernel files -----
+        test -f "${KERNEL_DIR}/common/fs/susfs.c" || {
+          echo "ERROR: common/fs/susfs.c missing." >&2
+          exit 1
+        }
+
+        test -f "$SUSFS_HEADER" || {
+          echo "ERROR: susfs.h missing." >&2
+          exit 1
+        }
+
+        SUSFS_VERSION="$(
+          grep '^#define SUSFS_VERSION' "$SUSFS_HEADER" |
+          awk -F'"' '{print $2}'
+        )"
+
+        echo
+        echo "Detected SUSFS version: ${SUSFS_VERSION}"
+
+        if [ "$SUSFS_VERSION" != "v2.3.0" ]; then
+          echo "ERROR: Expected SUSFS v2.3.0." >&2
+          exit 1
+        fi
+
+        # ----- Reject partial/failed patch applications -----
+        REJECT="$(
+          find "$KERNEL_DIR" "$SUSFS_DIR" \
+            -type f -name '*.rej' -print -quit 2>/dev/null || true
+        )"
+
+        if [ -n "$REJECT" ]; then
+          echo "ERROR: Patch reject found: $REJECT" >&2
+          exit 1
+        fi
+
+        echo
+        echo "=============================================="
+        echo "ALL STRICT VALIDATIONS PASSED"
+        echo "CONFIG_KSU=y"
+        echo "CONFIG_KPM=y"
+        echo "FULL SUSFS FEATURE SET=y"
+        echo "SUSFS_VERSION=v2.3.0"
+        echo "No patch rejects found"
+        echo "=============================================="
+
     - name: Scan and collect patch rejects
       id: scan
       if: always()
