@@ -88,6 +88,18 @@ on:
         type: string
         default: ""
 
+      ksu_manager_size:
+        description: "Expected KernelSU/SukiSU manager APK certificate size"
+        required: false
+        type: string
+        default: ""
+
+      ksu_manager_hash:
+        description: "Expected KernelSU/SukiSU manager APK certificate SHA256"
+        required: false
+        type: string
+        default: ""
+
 jobs:
   generate-matrix:
     runs-on: ubuntu-latest
@@ -196,4 +208,6 @@ jobs:
       use_cache: ${{ inputs.use_cache }}
       expected_kernel_source_commit: ${{ inputs.expected_kernel_source_commit }}
       expected_sublevel: ${{ inputs.expected_sublevel }}
+      ksu_manager_size: ${{ inputs.ksu_manager_size }}
+      ksu_manager_hash: ${{ inputs.ksu_manager_hash }}
     secrets: inherit
