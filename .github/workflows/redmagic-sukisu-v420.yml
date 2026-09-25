@@ -1,0 +1,185 @@
+name: REDMAGIC Nova - SukiSU Ultra v4.2.0 - SUSFS + KPM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  preflight:
+    name: Verify and freeze build sources
+    runs-on: ubuntu-latest
+
+    outputs:
+      kernel_patches_commit: ${{ steps.pins.outputs.kernel_patches_commit }}
+      anykernel3_commit: ${{ steps.pins.outputs.anykernel3_commit }}
+
+    steps:
+      - name: Verify immutable REDMAGIC baseline and resolve helper SHAs
+        id: pins
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_AOSP="38c2ee7f1213aaa84824aa93e0fbfb80bdb3efb6"
+          AOSP_TAG="android14-6.1.177_r00"
+
+          SUKISU_COMMIT="b20dee702035af09cb2ecb5f35443bbc1747f3e6"
+          SUSFS_COMMIT="4fc9c1898ea66f51847cdbc0d1473ea4ef525a70"
+
+          echo "=== Verify immutable Android kernel baseline ==="
+
+          AOSP_COMMIT="$(
+            git ls-remote \
+              https://android.googlesource.com/kernel/common \
+              "refs/tags/${AOSP_TAG}*" |
+            awk '$2 ~ /\^\{\}$/ {print $1; exit}'
+          )"
+
+          if [ -z "$AOSP_COMMIT" ]; then
+            echo "ERROR: Unable to resolve ${AOSP_TAG}." >&2
+            exit 1
+          fi
+
+          echo "AOSP tag:      ${AOSP_TAG}"
+          echo "Expected SHA:  ${EXPECTED_AOSP}"
+          echo "Resolved SHA:  ${AOSP_COMMIT}"
+
+          if [ "$AOSP_COMMIT" != "$EXPECTED_AOSP" ]; then
+            echo "ERROR: Official AOSP tag does not resolve to expected commit." >&2
+            exit 1
+          fi
+
+          resolve_head() {
+            local repo="$1"
+            local ref="$2"
+            local sha
+
+            sha="$(git ls-remote "$repo" "$ref" | awk 'NR==1 {print $1}')"
+
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "ERROR: Failed to resolve full SHA for $repo $ref" >&2
+              exit 1
+            fi
+
+            printf '%s' "$sha"
+          }
+
+          KERNEL_PATCHES_COMMIT="$(
+            resolve_head \
+              https://github.com/WildKernels/kernel_patches.git \
+              refs/heads/main
+          )"
+
+          ANYKERNEL3_COMMIT="$(
+            resolve_head \
+              https://github.com/WildKernels/AnyKernel3.git \
+              refs/heads/gki-2.0
+          )"
+
+          echo
+          echo "=== Exact source set for this run ==="
+          echo "AOSP kernel/common: ${EXPECTED_AOSP}"
+          echo "SukiSU:            ${SUKISU_COMMIT}"
+          echo "SUSFS:             ${SUSFS_COMMIT}"
+          echo "kernel_patches:    ${KERNEL_PATCHES_COMMIT}"
+          echo "AnyKernel3:        ${ANYKERNEL3_COMMIT}"
+
+          echo "kernel_patches_commit=${KERNEL_PATCHES_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "anykernel3_commit=${ANYKERNEL3_COMMIT}" >> "$GITHUB_OUTPUT"
+
+          cat > source-pins.txt <<EOF
+          REDMAGIC Nova / NP03J
+          =====================================
+
+          Android OS:
+          Android 16
+
+          KMI:
+          android14-6.1
+
+          Kernel:
+          6.1.177
+
+          AOSP tag:
+          ${AOSP_TAG}
+
+          AOSP kernel/common:
+          ${EXPECTED_AOSP}
+
+          SukiSU Ultra kernel commit:
+          ${SUKISU_COMMIT}
+
+          SukiSU Manager:
+          Official stable v4.2.0 / 40900-2
+
+          SukiSU official v4.2.0 release commit:
+          85eb4a95b8a61d756ecf53b9c5785e48e1b15039
+
+          SUSFS:
+          v2.3.0
+
+          SUSFS commit:
+          ${SUSFS_COMMIT}
+
+          KPM:
+          CONFIG_KPM=y
+
+          kernel_patches:
+          ${KERNEL_PATCHES_COMMIT}
+
+          AnyKernel3:
+          ${ANYKERNEL3_COMMIT}
+
+          Cache:
+          disabled for first validation build
+
+          Feature set:
+          SUSFS only + mandatory KPM from SukiSU root setup
+          EOF
+
+      - name: Upload exact source pins
+        uses: actions/upload-artifact@v7
+        with:
+          name: REDMAGIC-Nova-SukiSU-v4.2.0-SourcePins
+          path: source-pins.txt
+          compression-level: 9
+
+  build:
+    name: Build REDMAGIC Nova SukiSU kernel
+    needs: preflight
+
+    uses: ./.github/workflows/prepare.yml
+
+    with:
+      config_file: .github/config/android14-6.1.json
+
+      feature_set: "SUSFS"
+
+      root_flavor: "sukisu-ultra"
+
+      root_commit: "b20dee702035af09cb2ecb5f35443bbc1747f3e6"
+
+      susfs_commit: "4fc9c1898ea66f51847cdbc0d1473ea4ef525a70"
+
+      kernel_patches_commit: ${{ needs.preflight.outputs.kernel_patches_commit }}
+
+      anykernel3_commit: ${{ needs.preflight.outputs.anykernel3_commit }}
+
+      brand_name: "Wild"
+
+      bypass: false
+
+      use_cache: false
+
+      os_patch_level: "lts"
+
+      variant: "REDMAGIC-SukiSU-v4.2.0-SUSFS-KPM"
+
+      expected_kernel_source_commit: "38c2ee7f1213aaa84824aa93e0fbfb80bdb3efb6"
+
+      expected_sublevel: "177"
+
+    secrets: inherit
