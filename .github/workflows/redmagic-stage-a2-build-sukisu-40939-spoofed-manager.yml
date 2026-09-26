@@ -319,15 +319,41 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install exact Android build dependencies
+      - name: Install exact Android 17 build dependencies
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platforms;android-37" \
-            "build-tools;37.0.0" \
-            "ndk;$EXPECTED_NDK"
+
+          # Android 17 / API 37 is currently exposed through the preview channels.
+          # Use Google's current Android CLI instead of the deprecated sdkmanager path.
+          ANDROID_CLI="$(command -v android || true)"
+          if [ -z "$ANDROID_CLI" ]; then
+            ANDROID_CLI="$(find "$ANDROID_HOME/cmdline-tools" -type f -name android -perm -u+x 2>/dev/null | sort -V | tail -n1)"
+          fi
+
+          if [ -z "$ANDROID_CLI" ] || [ ! -x "$ANDROID_CLI" ]; then
+            echo "ERROR: Android CLI binary was not found after setup-android."
+            echo "ANDROID_HOME=$ANDROID_HOME"
+            find "$ANDROID_HOME/cmdline-tools" -maxdepth 4 -type f -name 'android*' -print || true
+            exit 1
+          fi
+
+          echo "Android CLI: $ANDROID_CLI"
+          "$ANDROID_CLI" --version
+
+          echo "=== Confirm API 37 / Build Tools 37 availability ==="
+          "$ANDROID_CLI" --sdk="$ANDROID_HOME" sdk list --all --all-versions --canary "platforms/*"             | grep -E 'platforms/android-37|android-37' || true
+          "$ANDROID_CLI" --sdk="$ANDROID_HOME" sdk list --all --all-versions --canary "build-tools/*"             | grep -E 'build-tools/37\.0\.0|37\.0\.0' || true
+
+          echo "=== Install pinned Android dependencies ==="
+          "$ANDROID_CLI" --sdk="$ANDROID_HOME" sdk install --canary             platforms/android-37             build-tools/37.0.0             "ndk/$EXPECTED_NDK"
+
+          echo "=== Hard-gate installed paths ==="
+          test -d "$ANDROID_HOME/platforms/android-37"
+          test -d "$ANDROID_HOME/build-tools/37.0.0"
+          test -d "$ANDROID_HOME/ndk/$EXPECTED_NDK"
+
+          echo "Android SDK dependency gate: PASS"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
