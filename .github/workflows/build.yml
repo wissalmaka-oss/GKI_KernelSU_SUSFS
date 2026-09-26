@@ -651,6 +651,23 @@ jobs:
           exit 1
         }
 
+        MANAGER_SIZE="${{ inputs.ksu_manager_size }}"
+        MANAGER_HASH="${{ inputs.ksu_manager_hash }}"
+
+        echo
+        echo "Manager signature size: $MANAGER_SIZE"
+        echo "Manager signature hash: $MANAGER_HASH"
+
+        if [ "$MANAGER_SIZE" != "0x35c" ]; then
+          echo "ERROR: Wrong SukiSU v4.2.0 manager certificate size." >&2
+          exit 1
+        fi
+
+        if [ "$MANAGER_HASH" != "947ae944f3de4ed4c21a7e4f7953ecf351bfa2b36239da37a34111ad29993eef" ]; then
+          echo "ERROR: Wrong SukiSU v4.2.0 manager certificate hash." >&2
+          exit 1
+        fi
+
         # ----- Required complete feature set -----
         REQUIRED_CONFIGS=(
           CONFIG_KSU
