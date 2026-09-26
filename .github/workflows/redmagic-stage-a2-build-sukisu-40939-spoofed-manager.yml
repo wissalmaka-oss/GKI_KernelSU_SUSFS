@@ -1,0 +1,496 @@
+name: Stage A2 - Build pinned SukiSU 40939 Spoofed Manager
+
+on:
+  workflow_dispatch:
+    inputs:
+      manager_package:
+        description: "Permanent 3-part lowercase package name. Freeze after first successful build."
+        required: true
+        default: "mirexo.lunari.velora"
+        type: string
+      manager_name:
+        description: "Visible app name"
+        required: true
+        default: "SukiSU"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SUKISU_REPO: "https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
+  SUKISU_SHA: "cf87e3f4ddd3f6e5464d85acf56aaa6950e70841"
+  EXPECTED_COMMIT_COUNT: "3754"
+  EXPECTED_VERSION: "40939"
+  EXPECTED_UAPI: "4"
+  EXPECTED_NDK: "29.0.14206865"
+
+jobs:
+  preflight:
+    name: Verify immutable source and inputs
+    runs-on: ubuntu-latest
+    outputs:
+      package_name: ${{ steps.pkg.outputs.package_name }}
+      source_tag: ${{ steps.verify.outputs.source_tag }}
+    steps:
+      - name: Validate package name
+        id: pkg
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ inputs.manager_package }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PACKAGE_NAME" =~ ^[a-z][a-z0-9_]{2,30}\.[a-z][a-z0-9_]{2,30}\.[a-z][a-z0-9_]{2,30}$ ]]; then
+            echo "ERROR: manager_package must be exactly three lowercase package segments."
+            exit 1
+          fi
+          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Clone exact SukiSU source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$SUKISU_REPO" SukiSU-Ultra
+          cd SukiSU-Ultra
+          git checkout --detach "$SUKISU_SHA"
+          test "$(git rev-parse HEAD)" = "$SUKISU_SHA"
+
+      - name: Verify generation, UAPI and source contracts
+        id: verify
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ inputs.manager_package }}
+        run: |
+          set -euo pipefail
+          cd SukiSU-Ultra
+
+          COUNT="$(git rev-list --count HEAD)"
+          test "$COUNT" = "$EXPECTED_COMMIT_COUNT"
+
+          MANAGER_VERSION=$((4 * 10000 + COUNT - 2815))
+          KSUD_VERSION=$((40000 - 2815 + COUNT))
+          test "$MANAGER_VERSION" = "$EXPECTED_VERSION"
+          test "$KSUD_VERSION" = "$EXPECTED_VERSION"
+
+          UAPI_TOP="$(sed -n 's/.*KERNEL_SU_UAPI_VERSION = \([0-9][0-9]*\).*/\1/p' uapi/supercall.h | head -n1)"
+          UAPI_KERNEL="$(sed -n 's/.*KERNEL_SU_UAPI_VERSION = \([0-9][0-9]*\).*/\1/p' kernel/include/uapi/supercall.h | head -n1)"
+          test "$UAPI_TOP" = "$EXPECTED_UAPI"
+          test "$UAPI_KERNEL" = "$EXPECTED_UAPI"
+
+          grep -Fq 'project.findProperty("KSU_PACKAGE_NAME")' manager/app/build.gradle.kts
+          grep -Fq 'applicationId = managerPackageName' manager/app/build.gradle.kts
+          grep -Fq 'env!("KSU_PACKAGE_NAME")' userspace/ksud/src/defs.rs
+          grep -Fq 'storeFileProperty = "KEYSTORE_FILE"' manager/app/build.gradle.kts
+          grep -Fq 'storePasswordProperty = "KEYSTORE_PASSWORD"' manager/app/build.gradle.kts
+          grep -Fq 'keyAliasProperty = "KEY_ALIAS"' manager/app/build.gradle.kts
+          grep -Fq 'keyPasswordProperty = "KEY_PASSWORD"' manager/app/build.gradle.kts
+          grep -Fq '#define CERT_MAX_LENGTH 1024' kernel/manager/apk_sign.c
+
+          SOURCE_TAG="$(git describe --tags --always --abbrev=0)"
+          echo "source_tag=$SOURCE_TAG" >> "$GITHUB_OUTPUT"
+
+          cat > ../StageA2-Preflight.txt <<EOF
+          SUKISU_SHA=$SUKISU_SHA
+          COMMIT_COUNT=$COUNT
+          MANAGER_VERSION=$MANAGER_VERSION
+          KSUD_VERSION=$KSUD_VERSION
+          UAPI_TOP=$UAPI_TOP
+          UAPI_KERNEL=$UAPI_KERNEL
+          MANAGER_PACKAGE=$PACKAGE_NAME
+          SOURCE_TAG=$SOURCE_TAG
+          CERT_MAX_LENGTH=1024
+          PREFLIGHT=PASS
+          EOF
+
+      - name: Upload preflight proof
+        uses: actions/upload-artifact@v7
+        with:
+          name: StageA2-Preflight-40939
+          path: StageA2-Preflight.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  build-ksud:
+    name: Build ksud ${{ matrix.target }}
+    needs: preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            abi: arm64-v8a
+          - target: armv7-linux-androideabi
+            abi: armeabi-v7a
+          - target: x86_64-linux-android
+            abi: x86_64
+
+    steps:
+      - name: Clone exact SukiSU source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$SUKISU_REPO" SukiSU-Ultra
+          cd SukiSU-Ultra
+          git checkout --detach "$SUKISU_SHA"
+          test "$(git rev-parse HEAD)" = "$SUKISU_SHA"
+          test "$(git rev-list --count HEAD)" = "$EXPECTED_COMMIT_COUNT"
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup update stable
+          rustup target add "${{ matrix.target }}"
+          rustc --version
+          cargo --version
+
+      - name: Setup Android NDK r29
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29
+
+      - name: Build ksud with the permanent Manager package
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          KSU_PACKAGE_NAME: ${{ needs.preflight.outputs.package_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cd SukiSU-Ultra
+          source .github/scripts/setup-rust-build.sh "$TARGET" 26
+
+          cargo build \
+            --target "$TARGET" \
+            --release \
+            --manifest-path ./userspace/ksud/Cargo.toml
+
+          BIN="target/$TARGET/release/ksud"
+          test -s "$BIN"
+
+          # Compile-time package binding must actually be present in the binary.
+          grep -aFq "$KSU_PACKAGE_NAME" "$BIN"
+
+          SHA="$(sha256sum "$BIN" | awk '{print $1}')"
+          printf '%s\n' "$SHA  ksud" > "ksud-$TARGET.sha256"
+
+      - name: Upload ksud
+        uses: actions/upload-artifact@v7
+        with:
+          name: ksud-${{ matrix.target }}-40939
+          path: |
+            SukiSU-Ultra/target/${{ matrix.target }}/release/ksud
+            SukiSU-Ultra/ksud-${{ matrix.target }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  build-manager:
+    name: Build signed deterministic spoofed Manager 40939
+    needs:
+      - preflight
+      - build-ksud
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_NAME: ${{ needs.preflight.outputs.package_name }}
+      MANAGER_NAME: ${{ inputs.manager_name }}
+      KEYSTORE_B64: ${{ secrets.SUKISU_KEYSTORE_B64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.SUKISU_KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.SUKISU_KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.SUKISU_KEY_PASSWORD }}
+
+    steps:
+      - name: Require persistent signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_B64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+
+      - name: Clone exact SukiSU source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "$SUKISU_REPO" SukiSU-Ultra
+          cd SukiSU-Ultra
+          git checkout --detach "$SUKISU_SHA"
+          test "$(git rev-parse HEAD)" = "$SUKISU_SHA"
+          test "$(git rev-list --count HEAD)" = "$EXPECTED_COMMIT_COUNT"
+
+      - name: Apply deterministic official-style spoof transformation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IFS='.' read -r WORD1 WORD2 WORD3 <<< "$PACKAGE_NAME"
+          WORD4="tavero"
+
+          cd SukiSU-Ultra/manager
+
+          # Same class/package transformation pattern used by SukiSU's official spoofed Manager job,
+          # but deterministic so the package is stable across rebuilds.
+          find . -depth -type d -name 'com' \
+            -execdir mv {} "$WORD1" \;
+          find . -depth -type d -name 'sukisu' \
+            -execdir mv {} "$WORD2" \;
+          find . -depth -type d -name 'ultra' \
+            -execdir mv {} "$WORD3" \;
+          find . -depth -type d -name 'io' \
+            -execdir mv {} "$WORD4" \;
+
+          export WORD1 WORD2 WORD3 WORD4
+          find . -type f -exec sed -i \
+            -e "s/com\.sukisu\.ultra/$WORD1.$WORD2.$WORD3/g" \
+            -e "s/io\.sukisu\.ultra/$WORD4.$WORD2.$WORD3/g" \
+            -e "s/com\.sukisu\.zako/$WORD1.$WORD2.zako/g" \
+            -e "s/com\/sukisu\/ultra/$WORD1\/$WORD2\/$WORD3/g" \
+            -e "s/io\/sukisu\/ultra/$WORD4\/$WORD2\/$WORD3/g" \
+            -e "s/io_sukisu_ultra/${WORD4}_${WORD2}_${WORD3}/g" \
+            -e "s/com_sukisu_ultra/${WORD1}_${WORD2}_${WORD3}/g" \
+            {} +
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("build.gradle.kts")
+          s = p.read_text()
+          old = 'return process.inputStream.bufferedReader().use { it.readText().trim() }'
+          new = old + ' + "-spoofed"'
+          if old not in s:
+              raise SystemExit("getGitDescribe() body did not match pinned source")
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+          grep -Fq '"-spoofed"' build.gradle.kts
+
+          # Required final package contract must still be supported after transformation.
+          grep -Fq 'project.findProperty("KSU_PACKAGE_NAME")' app/build.gradle.kts
+          grep -Fq 'applicationId = managerPackageName' app/build.gradle.kts
+
+      - name: Download arm64 ksud
+        uses: actions/download-artifact@v8
+        with:
+          name: ksud-aarch64-linux-android-40939
+          path: ksud-artifacts/arm64
+
+      - name: Download armv7 ksud
+        uses: actions/download-artifact@v8
+        with:
+          name: ksud-armv7-linux-androideabi-40939
+          path: ksud-artifacts/armv7
+
+      - name: Download x86_64 ksud
+        uses: actions/download-artifact@v8
+        with:
+          name: ksud-x86_64-linux-android-40939
+          path: ksud-artifacts/x86_64
+
+      - name: Insert matched ksud binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p SukiSU-Ultra/manager/app/src/main/jniLibs/arm64-v8a
+          mkdir -p SukiSU-Ultra/manager/app/src/main/jniLibs/armeabi-v7a
+          mkdir -p SukiSU-Ultra/manager/app/src/main/jniLibs/x86_64
+
+          ARM64="$(find ksud-artifacts/arm64 -type f -name ksud | head -n1)"
+          ARMV7="$(find ksud-artifacts/armv7 -type f -name ksud | head -n1)"
+          X64="$(find ksud-artifacts/x86_64 -type f -name ksud | head -n1)"
+
+          test -s "$ARM64"
+          test -s "$ARMV7"
+          test -s "$X64"
+
+          cp "$ARM64" SukiSU-Ultra/manager/app/src/main/jniLibs/arm64-v8a/libksud.so
+          cp "$ARMV7" SukiSU-Ultra/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
+          cp "$X64" SukiSU-Ultra/manager/app/src/main/jniLibs/x86_64/libksud.so
+
+          grep -aFq "$PACKAGE_NAME" SukiSU-Ultra/manager/app/src/main/jniLibs/arm64-v8a/libksud.so
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install exact Android build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-37" \
+            "build-tools;37.0.0" \
+            "ndk;$EXPECTED_NDK"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Restore persistent signing key and preflight certificate
+        id: cert
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd SukiSU-Ultra/manager
+
+          printf '%s' "$KEYSTORE_B64" | base64 -d > key.jks
+          test -s key.jks
+
+          keytool -list \
+            -keystore key.jks \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -alias "$KEY_ALIAS" >/dev/null
+
+          keytool -exportcert \
+            -alias "$KEY_ALIAS" \
+            -keystore key.jks \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -file signing-cert.der
+
+          CERT_SIZE_DEC="$(stat -c%s signing-cert.der)"
+          CERT_SIZE_HEX="$(printf '0x%x' "$CERT_SIZE_DEC")"
+          CERT_SHA256="$(sha256sum signing-cert.der | awk '{print $1}')"
+
+          # SukiSU kernel/manager/apk_sign.c has CERT_MAX_LENGTH=1024.
+          test "$CERT_SIZE_DEC" -le 1024
+
+          {
+            echo "KEYSTORE_FILE=key.jks"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "KEY_ALIAS=$KEY_ALIAS"
+            echo "KEY_PASSWORD=$KEY_PASSWORD"
+          } >> gradle.properties
+
+          echo "cert_size_dec=$CERT_SIZE_DEC" >> "$GITHUB_OUTPUT"
+          echo "cert_size_hex=$CERT_SIZE_HEX" >> "$GITHUB_OUTPUT"
+          echo "cert_sha256=$CERT_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd SukiSU-Ultra/manager
+
+          ./gradlew clean assembleRelease \
+            -PKSU_PACKAGE_NAME="$PACKAGE_NAME" \
+            -PKSU_NAME="$MANAGER_NAME"
+
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | head -n1)"
+          test -s "$APK"
+
+          mkdir -p ../../out
+          cp "$APK" "../../out/SukiSU-40939-Spoofed-${PACKAGE_NAME}.apk"
+
+      - name: Inspect final APK and hard-gate package/version/signature
+        id: inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="out/SukiSU-40939-Spoofed-${PACKAGE_NAME}.apk"
+          test -s "$APK"
+
+          APKANALYZER="$(command -v apkanalyzer || true)"
+          if [ -z "$APKANALYZER" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" ]; then
+            APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          fi
+          test -x "$APKANALYZER"
+
+          APP_ID="$("$APKANALYZER" manifest application-id "$APK" | tr -d '\r')"
+          VERSION_CODE="$("$APKANALYZER" manifest version-code "$APK" | tr -d '\r')"
+          VERSION_NAME="$("$APKANALYZER" manifest version-name "$APK" | tr -d '\r')"
+
+          test "$APP_ID" = "$PACKAGE_NAME"
+          test "$VERSION_CODE" = "$EXPECTED_VERSION"
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n1)"
+          test -x "$APKSIGNER"
+
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee out/apksigner.txt
+
+          APK_CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK" \
+            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+            | head -n1 | tr 'A-F' 'a-f' | tr -d ':[:space:]')"
+
+          test -n "$APK_CERT_SHA256"
+          test "$APK_CERT_SHA256" = "${{ steps.cert.outputs.cert_sha256 }}"
+
+          # Kernel verifier explicitly expects one valid v2 signing block.
+          grep -Eq 'Verified using v2 scheme.*true' out/apksigner.txt
+
+          APK_SHA256="$(sha256sum "$APK" | awk '{print $1}')"
+
+          echo "app_id=$APP_ID" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
+          echo "apk_cert_sha256=$APK_CERT_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Create BuildInfo and SourcePins
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="out/SukiSU-40939-Spoofed-${PACKAGE_NAME}.apk"
+
+          ARM64_SHA="$(sha256sum SukiSU-Ultra/manager/app/src/main/jniLibs/arm64-v8a/libksud.so | awk '{print $1}')"
+          ARMV7_SHA="$(sha256sum SukiSU-Ultra/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so | awk '{print $1}')"
+          X64_SHA="$(sha256sum SukiSU-Ultra/manager/app/src/main/jniLibs/x86_64/libksud.so | awk '{print $1}')"
+
+          {
+            echo "STAGE=A2"
+            echo "RESULT=PASS"
+            echo "SUKISU_REPO=$SUKISU_REPO"
+            echo "SUKISU_SHA=$SUKISU_SHA"
+            echo "SOURCE_TAG=${{ needs.preflight.outputs.source_tag }}"
+            echo "COMMIT_COUNT=$EXPECTED_COMMIT_COUNT"
+            echo "MANAGER_PACKAGE=${{ steps.inspect.outputs.app_id }}"
+            echo "MANAGER_VERSION_CODE=${{ steps.inspect.outputs.version_code }}"
+            echo "MANAGER_VERSION_NAME=${{ steps.inspect.outputs.version_name }}"
+            echo "UAPI=$EXPECTED_UAPI"
+            echo "CERT_SIZE_DEC=${{ steps.cert.outputs.cert_size_dec }}"
+            echo "CERT_SIZE_HEX=${{ steps.cert.outputs.cert_size_hex }}"
+            echo "CERT_SHA256=${{ steps.cert.outputs.cert_sha256 }}"
+            echo "APK_CERT_SHA256=${{ steps.inspect.outputs.apk_cert_sha256 }}"
+            echo "APK_SHA256=${{ steps.inspect.outputs.apk_sha256 }}"
+            echo "KSUD_ARM64_SHA256=$ARM64_SHA"
+            echo "KSUD_ARMV7_SHA256=$ARMV7_SHA"
+            echo "KSUD_X86_64_SHA256=$X64_SHA"
+            echo "CERT_MAX_LENGTH=1024"
+          } > out/StageA2-BuildInfo.txt
+
+          {
+            echo "SUKISU_SHA=$SUKISU_SHA"
+            echo "SUKISU_COMMIT_COUNT=$EXPECTED_COMMIT_COUNT"
+            echo "MANAGER_GENERATION=$EXPECTED_VERSION"
+            echo "KSUD_GENERATION=$EXPECTED_VERSION"
+            echo "UAPI=$EXPECTED_UAPI"
+            echo "NDK=$EXPECTED_NDK"
+          } > out/StageA2-SourcePins.txt
+
+          cat out/StageA2-BuildInfo.txt
+
+      - name: Remove private signing material before artifact upload
+        if: always()
+        shell: bash
+        run: |
+          rm -f SukiSU-Ultra/manager/key.jks
+          rm -f SukiSU-Ultra/manager/signing-cert.der
+          rm -f SukiSU-Ultra/manager/gradle.properties
+
+      - name: Upload final Stage A2 artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: StageA2-SukiSU-40939-Spoofed-Manager
+          path: |
+            out/SukiSU-40939-Spoofed-*.apk
+            out/StageA2-BuildInfo.txt
+            out/StageA2-SourcePins.txt
+            out/apksigner.txt
+          if-no-files-found: error
+          retention-days: 30
