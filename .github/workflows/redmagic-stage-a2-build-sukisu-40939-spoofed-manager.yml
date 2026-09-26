@@ -342,14 +342,21 @@ jobs:
           "$ANDROID_CLI" --version
 
           echo "=== Confirm API 37 / Build Tools 37 availability ==="
-          "$ANDROID_CLI" --sdk="$ANDROID_HOME" sdk list --all --all-versions --canary "platforms/*"             | grep -E 'platforms/android-37|android-37' || true
+          "$ANDROID_CLI" --sdk="$ANDROID_HOME" sdk list --all --all-versions --canary "platforms/*"             | grep -E 'platforms/android-37\.0|android-37\.0' || true
           "$ANDROID_CLI" --sdk="$ANDROID_HOME" sdk list --all --all-versions --canary "build-tools/*"             | grep -E 'build-tools/37\.0\.0|37\.0\.0' || true
 
           echo "=== Install pinned Android dependencies ==="
           "$ANDROID_CLI" --sdk="$ANDROID_HOME" sdk install --canary             platforms/android-37             build-tools/37.0.0             "ndk/$EXPECTED_NDK"
 
           echo "=== Hard-gate installed paths ==="
-          test -d "$ANDROID_HOME/platforms/android-37"
+          # Android CLI names API 37's platform package "platforms/android-37.0".
+          # Verify through the package database instead of assuming its install-directory name.
+          "$ANDROID_CLI" --sdk="$ANDROID_HOME" sdk list             | tee /tmp/android-sdk-installed.txt
+
+          grep -Eq '^[[:space:]]*platforms/android-37\.0[[:space:]]' /tmp/android-sdk-installed.txt
+          grep -Eq '^[[:space:]]*build-tools/37\.0\.0[[:space:]]' /tmp/android-sdk-installed.txt
+          grep -Eq "^[[:space:]]*ndk/$EXPECTED_NDK[[:space:]]" /tmp/android-sdk-installed.txt
+
           test -d "$ANDROID_HOME/build-tools/37.0.0"
           test -d "$ANDROID_HOME/ndk/$EXPECTED_NDK"
 
