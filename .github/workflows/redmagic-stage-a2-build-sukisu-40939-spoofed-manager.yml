@@ -446,15 +446,21 @@ jobs:
 
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee out/apksigner.txt
 
-          APK_CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK" \
-            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
-            | head -n1 | tr 'A-F' 'a-f' | tr -d ':[:space:]')"
+          # Build Tools 37 prints signer details as
+          # "V2 Signer: certificate SHA-256 digest: ...", while older apksigner
+          # versions used "Signer #1 certificate SHA-256 digest: ...".
+          # Parse the stable "certificate SHA-256 digest:" suffix so both formats work.
+          APK_CERT_SHA256="$(grep -E 'certificate SHA-256 digest:' out/apksigner.txt \
+            | head -n1 \
+            | sed -E 's/^.*certificate SHA-256 digest:[[:space:]]*//' \
+            | tr 'A-F' 'a-f' \
+            | tr -d ':[:space:]')"
 
           test -n "$APK_CERT_SHA256"
           test "$APK_CERT_SHA256" = "${{ steps.cert.outputs.cert_sha256 }}"
 
-          # Kernel verifier explicitly expects one valid v2 signing block.
-          grep -Eq 'Verified using v2 scheme.*true' out/apksigner.txt
+          # Kernel verifier explicitly expects a valid APK Signature Scheme v2 block.
+          grep -Eq '^Verified using v2 scheme .*: true$' out/apksigner.txt
 
           APK_SHA256="$(sha256sum "$APK" | awk '{print $1}')"
 
