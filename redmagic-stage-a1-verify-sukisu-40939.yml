@@ -1,0 +1,156 @@
+name: Stage A1 - Verify SukiSU Manager 40939 Source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-source:
+    name: Verify exact 40939 source generation
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout SukiSU main candidate with full history
+        uses: actions/checkout@v6
+        with:
+          repository: SukiSU-Ultra/SukiSU-Ultra
+          ref: main
+          fetch-depth: 0
+          path: sukisu
+
+      - name: Verify Manager + kernel version logic and build mechanics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd sukisu
+
+          EXPECTED_COUNT=3754
+          EXPECTED_VERSION=40939
+
+          SHA="$(git rev-parse HEAD)"
+          COUNT="$(git rev-list --count HEAD)"
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+
+          echo "Candidate SHA:   $SHA"
+          echo "Candidate branch:$BRANCH"
+          echo "Commit count:    $COUNT"
+
+          # -------- Manager version formula --------
+          MANAGER_MAJOR="$(sed -nE 's/^[[:space:]]*val major = ([0-9]+).*/\1/p' manager/build.gradle.kts | head -n1)"
+          MANAGER_OFFSET="$(sed -nE 's/^[[:space:]]*val end = ([0-9]+).*/\1/p' manager/build.gradle.kts | head -n1)"
+
+          [[ -n "$MANAGER_MAJOR" ]] || { echo 'ERROR: Manager major not found'; exit 1; }
+          [[ -n "$MANAGER_OFFSET" ]] || { echo 'ERROR: Manager offset not found'; exit 1; }
+
+          MANAGER_VERSION=$(( MANAGER_MAJOR * 10000 + COUNT - MANAGER_OFFSET ))
+
+          echo "Manager formula: ${MANAGER_MAJOR}*10000 + ${COUNT} - ${MANAGER_OFFSET} = ${MANAGER_VERSION}"
+
+          # -------- Kernel version formula --------
+          KERNEL_BASE="$(sed -nE 's/^VERSION_BASE[[:space:]]*:=[[:space:]]*([0-9]+).*/\1/p' kernel/Kbuild | head -n1)"
+          KERNEL_OFFSET="$(sed -nE 's/^VERSION_OFFSET[[:space:]]*:=[[:space:]]*([0-9]+).*/\1/p' kernel/Kbuild | head -n1)"
+
+          [[ -n "$KERNEL_BASE" ]] || { echo 'ERROR: Kernel VERSION_BASE not found'; exit 1; }
+          [[ -n "$KERNEL_OFFSET" ]] || { echo 'ERROR: Kernel VERSION_OFFSET not found'; exit 1; }
+
+          KERNEL_VERSION_FROM_SAME_COUNT=$(( KERNEL_BASE + COUNT - KERNEL_OFFSET ))
+
+          echo "Kernel formula:  ${KERNEL_BASE} + ${COUNT} - ${KERNEL_OFFSET} = ${KERNEL_VERSION_FROM_SAME_COUNT}"
+
+          # -------- Hard generation gates --------
+          if [[ "$COUNT" -ne "$EXPECTED_COUNT" ]]; then
+            echo "ERROR: main moved. Expected commit count ${EXPECTED_COUNT}, got ${COUNT}."
+            echo "STOP: do not build a Manager from this source."
+            exit 1
+          fi
+
+          if [[ "$MANAGER_VERSION" -ne "$EXPECTED_VERSION" ]]; then
+            echo "ERROR: Manager generation is ${MANAGER_VERSION}, expected ${EXPECTED_VERSION}."
+            exit 1
+          fi
+
+          if [[ "$KERNEL_VERSION_FROM_SAME_COUNT" -ne "$EXPECTED_VERSION" ]]; then
+            echo "ERROR: Kernel formula from the same source generation gives ${KERNEL_VERSION_FROM_SAME_COUNT}, expected ${EXPECTED_VERSION}."
+            exit 1
+          fi
+
+          if [[ "$MANAGER_VERSION" -ne "$KERNEL_VERSION_FROM_SAME_COUNT" ]]; then
+            echo 'ERROR: Manager and kernel version formulas disagree.'
+            exit 1
+          fi
+
+          # -------- Custom package support --------
+          grep -F 'project.findProperty("KSU_PACKAGE_NAME")' manager/app/build.gradle.kts >/dev/null \
+            || { echo 'ERROR: KSU_PACKAGE_NAME Gradle property support not found'; exit 1; }
+          grep -F 'applicationId = managerPackageName' manager/app/build.gradle.kts >/dev/null \
+            || { echo 'ERROR: applicationId is not driven by managerPackageName'; exit 1; }
+
+          # ksud embeds its default package name at build time.
+          grep -F 'env!("KSU_PACKAGE_NAME")' userspace/ksud/src/defs.rs >/dev/null \
+            || { echo 'ERROR: ksud KSU_PACKAGE_NAME compile-time binding not found'; exit 1; }
+
+          # -------- Persistent signing support --------
+          for needle in \
+            'storeFileProperty = "KEYSTORE_FILE"' \
+            'storePasswordProperty = "KEYSTORE_PASSWORD"' \
+            'keyAliasProperty = "KEY_ALIAS"' \
+            'keyPasswordProperty = "KEY_PASSWORD"'
+          do
+            grep -F "$needle" manager/app/build.gradle.kts >/dev/null \
+              || { echo "ERROR: signing property missing: $needle"; exit 1; }
+          done
+
+          # -------- Official spoofed-manager CI mechanics --------
+          grep -F 'spoofed: ["false", "true"]' .github/workflows/build-manager.yml >/dev/null \
+            || { echo 'ERROR: official normal/spoofed Manager matrix not found'; exit 1; }
+          grep -F 'Reproduce the original SukiSU randomizer' .github/workflows/build-manager.yml >/dev/null \
+            || { echo 'ERROR: official spoof randomizer block not found'; exit 1; }
+          grep -F 'assembleRelease' .github/workflows/build-manager.yml >/dev/null \
+            || { echo 'ERROR: official release Manager build command not found'; exit 1; }
+          grep -F 'libksud.so' .github/workflows/build-manager.yml >/dev/null \
+            || { echo 'ERROR: official ksud packaging path not found'; exit 1; }
+
+          # -------- Record UAPI declarations without assuming a value yet --------
+          mkdir -p ../stage-a1-proof
+          {
+            echo 'SUKISU_STAGE_A1_SOURCE_PROOF=PASS'
+            echo "PINNED_CANDIDATE_SHA=$SHA"
+            echo "COMMIT_COUNT=$COUNT"
+            echo "MANAGER_VERSION=$MANAGER_VERSION"
+            echo "KERNEL_VERSION_FROM_SAME_GENERATION=$KERNEL_VERSION_FROM_SAME_COUNT"
+            echo "MANAGER_MAJOR=$MANAGER_MAJOR"
+            echo "MANAGER_OFFSET=$MANAGER_OFFSET"
+            echo "KERNEL_BASE=$KERNEL_BASE"
+            echo "KERNEL_OFFSET=$KERNEL_OFFSET"
+            echo
+            echo '[KSU_PACKAGE_NAME references]'
+            grep -n 'KSU_PACKAGE_NAME' manager/app/build.gradle.kts userspace/ksud/src/defs.rs .github/workflows/ksud.yml || true
+            echo
+            echo '[UAPI declarations/references]'
+            grep -RIn --exclude-dir=.git 'KERNEL_SU_UAPI_VERSION' uapi userspace/ksud kernel | head -n 100 || true
+          } | tee ../stage-a1-proof/StageA1-SourceProof.txt
+
+          {
+            echo '## Stage A1 — PASS'
+            echo
+            echo "- Candidate SHA: \`$SHA\`"
+            echo "- Commit count: \`$COUNT\`"
+            echo "- Manager generation: \`$MANAGER_VERSION\`"
+            echo "- Kernel generation from the same count: \`$KERNEL_VERSION_FROM_SAME_COUNT\`"
+            echo '- Custom package support: verified'
+            echo '- ksud compile-time package binding: verified'
+            echo '- Persistent signing properties: verified'
+            echo '- Official spoofed-manager workflow mechanics: verified'
+            echo
+            echo '**Do not build yet. Pin this exact SHA in Stage A2.**'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload source proof
+        uses: actions/upload-artifact@v7
+        with:
+          name: StageA1-SukiSU-40939-SourceProof
+          path: stage-a1-proof/StageA1-SourceProof.txt
+          if-no-files-found: error
+          retention-days: 30
